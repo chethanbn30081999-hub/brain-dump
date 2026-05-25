@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Brain Dump</title>
+  <link rel="apple-touch-icon" href="/icon-home.png">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#1e3a8a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Brain Dump">
+
+  <!-- Firebase SDK (module, loaded before React) -->
+  <script type="module">
+    import { initializeApp }    from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+                                from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+    import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch }
+                                from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+    // ═══════════════════════════════════════════════════════
+    //  PASTE YOUR FIREBASE CONFIG BELOW
+    //  (Firebase Console → Project Settings → Your apps → SDK setup)
+    // ═══════════════════════════════════════════════════════
+    const firebaseConfig = {
+      apiKey:            "AIzaSyDfJoySdfwgJ1o47Q8yHj9EBahfbRhPS1w",
+      authDomain:        "brain-dump-11925.firebaseapp.com",
+      projectId:         "brain-dump-11925",
+      storageBucket:     "brain-dump-11925.firebasestorage.app",
+      messagingSenderId: "780529271257",
+      appId:             "1:780529271257:web:074110e4eb799f2cea99c8",
+      measurementId:     "G-BKTFGM5NXZ"
+    };
+    // ═══════════════════════════════════════════════════════
+
+    const app  = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db   = getFirestore(app);
+
+    window.__fb = {
+      auth, db,
+      GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
+      collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch
+    };
+    window.dispatchEvent(new Event('fb-ready'));
+  </script>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+    body { margin: 0; background: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    .dragging { opacity: 0.3; transform: scale(0.95); transition: none !important; }
+    .task-card { cursor: grab; touch-action: none; user-select: none; }
+    .task-card:active { cursor: grabbing; }
+    .drop-active { outline: 2px dashed #3B63E1 !important; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin 0.8s linear infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    .pulse { animation: pulse 1.5s ease-in-out infinite; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+    const CATS = [
+      { id:'do-first', label:'Urgent & Important',        sub:'Do First',  bg:'bg-red-50',    border:'border-red-200',    hc:'text-red-700',    dot:'bg-red-400'    },
+      { id:'schedule', label:'Not Urgent & Important',     sub:'Schedule',  bg:'bg-blue-50',   border:'border-blue-200',   hc:'text-blue-700',   dot:'bg-blue-400'   },
+      { id:'delegate', label:'Urgent & Not Important',     sub:'Delegate',  bg:'bg-orange-50', border:'border-orange-200', hc:'text-orange-700', dot:'bg-orange-400' },
+      { id:'delete',   label:'Not Urgent & Not Important', sub:'Eliminate', bg:'bg-gray-100',  border:'border-gray-300',   hc:'text-gray-600',   dot:'bg-gray-400'   },
+    ];
+
+    /* ── wait for firebase module ── */
+    const fbReady = new Promise(res => {
+      if (window.__fb) { res(window.__fb); return; }
+      window.addEventListener('fb-ready', () => res(window.__fb), { once: true });
+    });
+
+    /* ══════════════ DRAG HOOK ══════════════ */
+    function useDrag(moveTask) {
+      const [over, setOver]   = useState(null);
+      const dragId  = useRef(null);
+      const tId     = useRef(null);
+      const ghost   = useRef(null);
+
+      const onDragStart = (e, id) => {
+        dragId.current = id; e.dataTransfer.effectAllowed = 'move';
+        setTimeout(() => document.getElementById('t-'+id)?.classList.add('dragging'), 0);
+      };
+      const onDragEnd = (e, id) => {
+        document.getElementById('t-'+id)?.classList.remove('dragging');
+        setOver(null); dragId.current = null;
+      };
+      const onDragOver = (e, cat) => { e.preventDefault(); setOver(cat); };
+      const onDrop     = (e, cat) => { e.preventDefault(); if (dragId.current) moveTask(dragId.current, cat); setOver(null); };
+
+      const onTouchStart = (e, id) => {
+        tId.current = id;
+        const el = document.getElementById('t-'+id); if (!el) return;
+        const r  = el.getBoundingClientRect();
+        const g  = el.cloneNode(true);
+        g.style.cssText = `position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;opacity:0.85;z-index:9999;pointer-events:none;border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,0.25);`;
+        g.removeAttribute('id'); document.body.appendChild(g); ghost.current = g;
+        el.classList.add('dragging');
+      };
+      const onTouchMove = (e) => {
+        if (!ghost.current) return; e.preventDefault();
+        const t = e.touches[0], g = ghost.current;
+        g.style.left = (t.clientX - g.offsetWidth/2)+'px';
+        g.style.top  = (t.clientY - g.offsetHeight/2)+'px';
+        g.style.display = 'none';
+        const under = document.elementFromPoint(t.clientX, t.clientY);
+        g.style.display = '';
+        setOver(under?.closest('[data-dz]')?.dataset.dz || null);
+      };
+      const onTouchEnd = (e) => {
+        const t = e.changedTouches[0];
+        if (ghost.current) {
+          ghost.current.style.display = 'none';
+          const under = document.elementFromPoint(t.clientX, t.clientY);
+          ghost.current.style.display = '';
+          const zone = under?.closest('[data-dz]')?.dataset.dz;
+          if (zone && tId.current) moveTask(tId.current, zone);
+          ghost.current.remove(); ghost.current = null;
+        }
+        document.getElementById('t-'+tId.current)?.classList.remove('dragging');
+        tId.current = null; setOver(null);
+      };
+
+      return { over, onDragStart, onDragEnd, onDragOver, onDrop, onTouchStart, onTouchMove, onTouchEnd };
+    }
+
+    /* ══════════════ TASK CARD ══════════════ */
+    function TaskCard({ task, drag, onPin, onStrike, onDelete, onCal, sm }) {
+      const sz = sm ? 'text-[10px]' : 'text-xs';
+      return (
+        <div id={'t-'+task.id} draggable
+          onDragStart={e=>drag.onDragStart(e,task.id)} onDragEnd={e=>drag.onDragEnd(e,task.id)}
+          onTouchStart={e=>drag.onTouchStart(e,task.id)}
+          className={`task-card bg-white/80 rounded-lg shadow-sm flex flex-col gap-1 select-none ${sm?'p-1.5':'p-2'}`}>
+          <div className="flex items-start gap-1">
+            <span className="text-gray-300 text-[10px] mt-0.5 shrink-0">⠿</span>
+            <span className={`leading-snug break-words flex-1 ${sz} ${task.strikethrough?'line-through text-gray-400':'text-gray-800'}`}>
+              {task.pinned && '📌 '}{task.text}
+            </span>
+          </div>
+          <div className="flex justify-between items-center border-t border-gray-100 pt-1">
+            <div className="flex gap-1.5">
+              <button onPointerDown={e=>e.stopPropagation()} onClick={()=>onPin(task.id)}    className={`text-[9px] ${task.pinned?'text-red-400':'text-gray-300'} hover:text-red-400`}>📌</button>
+              <button onPointerDown={e=>e.stopPropagation()} onClick={()=>onStrike(task.id)} className={`text-[9px] ${task.strikethrough?'text-blue-500 font-bold':'text-gray-300'} hover:text-blue-400`}><s>S</s></button>
+              <button onPointerDown={e=>e.stopPropagation()} onClick={()=>onCal(task)}       className="text-[9px] text-gray-300 hover:text-blue-500">📅</button>
+            </div>
+            <button onPointerDown={e=>e.stopPropagation()} onClick={()=>onDelete(task.id)} className="text-[9px] text-gray-300 hover:text-red-500">✕</button>
+          </div>
+        </div>
+      );
+    }
+
+    /* ══════════════ QUADRANT ══════════════ */
+    function Quad({ cat, tasks, drag, onPin, onStrike, onDelete, onCal, sm }) {
+      const isOver = drag.over === cat.id;
+      return (
+        <div data-dz={cat.id}
+          onDragOver={e=>drag.onDragOver(e,cat.id)} onDragLeave={()=>{}} onDrop={e=>drag.onDrop(e,cat.id)}
+          className={`${cat.bg} border-2 ${isOver?'border-blue-400 bg-blue-50/40':cat.border} rounded-2xl flex flex-col transition-colors ${sm?'p-2 min-h-[130px]':'p-3 min-h-[170px]'}`}>
+          <div className={`flex items-center gap-1.5 ${sm?'mb-1':'mb-2'}`}>
+            <span className={`w-2 h-2 rounded-full shrink-0 ${cat.dot}`}></span>
+            <div>
+              <p className={`font-bold leading-none ${cat.hc} ${sm?'text-[9px]':'text-[10px]'}`}>{cat.label}</p>
+              <p className={`text-gray-400 ${sm?'text-[8px]':'text-[9px]'}`}>{cat.sub}</p>
+            </div>
+          </div>
+          {isOver && <div className="border-2 border-dashed border-blue-400 rounded-lg p-1 mb-1 text-center text-[9px] text-blue-400 font-semibold">Drop here</div>}
+          <div className="flex-1 space-y-1.5 overflow-y-auto">
+            {tasks.length===0 && !isOver && <p className="text-[9px] text-gray-400 italic">No tasks yet.</p>}
+            {tasks.map(t=><TaskCard key={t.id} task={t} drag={drag} sm={sm} onPin={onPin} onStrike={onStrike} onDelete={onDelete} onCal={onCal}/>)}
+          </div>
+        </div>
+      );
+    }
+
+    /* ══════════════ CAL MODAL ══════════════ */
+    function CalModal({ task, date, setDate, onConfirm, onClose }) {
+      if (!task) return null;
+      return (
+        <div className="fixed inset-0 bg-black/60 z-[200] flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl">
+            <div className="flex justify-between items-start mb-4">
+              <h3 className="text-lg font-bold text-gray-900">Schedule Task</h3>
+              <button onClick={onClose} className="text-gray-400 bg-gray-100 rounded-full w-8 h-8 flex items-center justify-center">✕</button>
+            </div>
+            <p className="text-sm text-gray-600 mb-4 bg-gray-50 p-3 rounded-xl border border-gray-100">{task.text}</p>
+            <label className="block text-sm font-bold text-gray-700 mb-2">Date & Time:</label>
+            <input type="datetime-local" value={date} onChange={e=>setDate(e.target.value)}
+              className="w-full border border-gray-300 rounded-xl p-3 mb-5 focus:ring-2 focus:ring-blue-500 outline-none text-sm"/>
+            <button onClick={onConfirm} className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 active:scale-95 transition-transform">
+              Generate Calendar Event
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    /* ══════════════ DUMP BLOCK ══════════════ */
+    function DumpBlock({ sm, dumpText, onChange, onDump }) {
+      return (
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4">
+          <h2 className={`font-bold text-gray-900 mb-1 ${sm?'text-sm':'text-xl'}`}>Brain Dump</h2>
+          <p className={`text-gray-400 mb-3 ${sm?'text-xs':'text-sm'}`}>One task per line.</p>
+          <textarea className={`w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none resize-none bg-gray-50 ${sm?'h-24 text-xs':'h-28 text-sm'}`}
+            placeholder={"Update morning lab reports\nConsult attending about bed 4\nDraft TPA insurance letter"}
+            value={dumpText} onChange={e=>onChange(e.target.value)}/>
+          <button onClick={onDump} className="mt-2 w-full bg-[#3B63E1] hover:bg-blue-700 text-white font-semibold py-2.5 rounded-xl text-sm active:scale-95 transition-transform">
+            Extract Tasks
+          </button>
+        </div>
+      );
+    }
+
+    /* ══════════════ LOGIN ══════════════ */
+    function LoginScreen({ onLogin, busy }) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-slate-50 to-blue-100 p-6">
+          <div className="bg-white rounded-3xl shadow-2xl p-10 w-full max-w-sm text-center">
+            <img src="/icon-home.png" className="w-16 h-16 rounded-2xl shadow mx-auto mb-5"/>
+            <h1 className="text-3xl font-extrabold text-blue-900 mb-1">Brain Dump</h1>
+            <p className="text-gray-400 text-sm mb-2">Tasks synced across all your devices</p>
+            <p className="text-gray-400 text-xs mb-8">MacBook · iPhone · anywhere</p>
+            <button onClick={onLogin} disabled={busy}
+              className="w-full flex items-center justify-center gap-3 bg-white border-2 border-gray-200 hover:border-blue-400 text-gray-700 font-semibold py-3 px-5 rounded-2xl shadow hover:shadow-md transition-all active:scale-95 disabled:opacity-50">
+              {busy
+                ? <span className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full spin inline-block"></span>
+                : <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20H24v8h11.3C33.7 32.9 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3 0 5.7 1.1 7.8 2.9l5.7-5.7C33.8 6.5 29.2 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20c11 0 20-8 20-20 0-1.3-.1-2.7-.4-4z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.5 16 19 12 24 12c3 0 5.7 1.1 7.8 2.9l5.7-5.7C33.8 6.5 29.2 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.8-1.9 13.4-5l-6.2-5.2C29.3 35.3 26.8 36 24 36c-5.3 0-9.7-3.1-11.3-7.5l-6.6 5C9.7 39.7 16.3 44 24 44z"/><path fill="#1976D2" d="M43.6 20H24v8h11.3c-.8 2.2-2.3 4-4.2 5.2l6.2 5.2C40.9 35.1 44 30 44 24c0-1.3-.1-2.7-.4-4z"/></svg>
+              }
+              {busy ? 'Signing in…' : 'Continue with Google'}
+            </button>
+            <p className="text-[11px] text-gray-300 mt-6">Your tasks are private — only you can see them</p>
+          </div>
+        </div>
+      );
+    }
+
+    /* ══════════════ ROOT APP ══════════════ */
+    function App() {
+      const [fb,       setFb]       = useState(null);
+      const [user,     setUser]     = useState(undefined); // undefined = loading
+      const [tasks,    setTasks]    = useState([]);
+      const [syncing,  setSyncing]  = useState(false);
+      const [loginBusy,setLoginBusy]= useState(false);
+      const [dumpText, setDumpText] = useState(() => { try { return localStorage.getItem('bd_dump')||''; } catch { return ''; } });
+      const handleDumpTextChange = useCallback((val) => { setDumpText(val); try { localStorage.setItem('bd_dump', val); } catch {} }, []);
+      const [view,     setView]     = useState(() => window.innerWidth >= 900 ? 'mac' : 'iphone');
+      const [calTask,  setCalTask]  = useState(null);
+      const [calDate,  setCalDate]  = useState('');
+      const unsub = useRef(null);
+
+      
+
+      useEffect(() => {
+        fbReady.then(f => {
+          setFb(f);
+          f.onAuthStateChanged(f.auth, u => {
+            setUser(u);
+            setLoginBusy(false);
+            if (u) subscribeToTasks(u.uid, f);
+            else { unsub.current?.(); setTasks([]); }
+          });
+        });
+      }, []);
+
+      const subscribeToTasks = (uid, f) => {
+        unsub.current?.();
+        setSyncing(true);
+        const col = f.collection(f.db, 'users', uid, 'tasks');
+        unsub.current = f.onSnapshot(col, snap => {
+          setTasks(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b)=>(a.order||0)-(b.order||0)));
+          setSyncing(false);
+        }, () => setSyncing(false));
+      };
+
+      const login  = async () => { setLoginBusy(true); try { await fb.signInWithPopup(fb.auth, new fb.GoogleAuthProvider()); } catch { setLoginBusy(false); } };
+      const logout = async () => { unsub.current?.(); await fb.signOut(fb.auth); setTasks([]); };
+
+      /* Firestore task ops */
+      const taskRef = (id) => fb.doc(fb.db, 'users', user.uid, 'tasks', id);
+      const addTasks = async (list) => {
+        const batch = fb.writeBatch(fb.db);
+        list.forEach(t => batch.set(taskRef(t.id), t));
+        await batch.commit();
+      };
+      const updTask = async (id, data) => fb.setDoc(taskRef(id), data, { merge: true });
+      const delTask  = (id) => fb.deleteDoc(taskRef(id));
+
+      const handleDump = async () => {
+        if (!dumpText.trim()) return;
+        const list = dumpText.split('\n').filter(l=>l.trim()).map((text,i)=>({
+          id: crypto.randomUUID(), text: text.trim(), category: 'unsorted',
+          pinned: false, strikethrough: false, order: Date.now()+i
+        }));
+        setDumpText('');
+        try { localStorage.removeItem('bd_dump'); } catch {}
+        await addTasks(list);
+      };
+
+      const moveTask  = (id, cat) => updTask(id, { category: cat });
+      const delT      = (id)      => delTask(id);
+      const togglePin = (id)      => { const t=tasks.find(x=>x.id===id); if(t) updTask(id,{pinned:!t.pinned}); };
+      const toggleStr = (id)      => { const t=tasks.find(x=>x.id===id); if(t) updTask(id,{strikethrough:!t.strikethrough}); };
+
+      const openCal = (task) => {
+        setCalTask(task);
+        const now=new Date(); now.setHours(now.getHours()+1); now.setMinutes(0);
+        setCalDate((new Date(now.getTime()-now.getTimezoneOffset()*60000)).toISOString().slice(0,16));
+      };
+      const confirmCal = () => {
+        if (!calTask||!calDate) return;
+        const s=new Date(calDate), e=new Date(s.getTime()+3600000);
+        const f=d=>d.toISOString().replace(/-|:|\.\d+/g,'');
+        const ics=`BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nSUMMARY:${calTask.text}\nDTSTART:${f(s)}\nDTEND:${f(e)}\nEND:VEVENT\nEND:VCALENDAR`;
+        const blob=new Blob([ics],{type:'text/calendar;charset=utf-8'});
+        const url=URL.createObjectURL(blob);
+        const a=Object.assign(document.createElement('a'),{href:url});
+        a.setAttribute('download','task.ics'); document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setCalTask(null);
+      };
+
+      const ordered  = useCallback((cat) => tasks.filter(t=>t.category===cat).sort((a,b)=>(a.order||0)-(b.order||0)), [tasks]);
+      const unsorted = useMemo(() => tasks.filter(t=>t.category==='unsorted'), [tasks]);
+      const drag     = useDrag(moveTask);
+
+      /* loading */
+      if (user === undefined) return (
+        <div className="min-h-screen flex items-center justify-center bg-blue-50">
+          <div className="text-center"><div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full spin mx-auto mb-3"></div><p className="text-gray-400 text-sm">Loading…</p></div>
+        </div>
+      );
+
+      if (!user) return <LoginScreen onLogin={login} busy={loginBusy}/>;
+
+      /* ── SHARED BLOCKS ── */
+
+      const TriageBlock = ({sm}) => (
+        <div data-dz="unsorted" onDragOver={e=>drag.onDragOver(e,'unsorted')} onDrop={e=>drag.onDrop(e,'unsorted')}
+          className={`bg-white rounded-2xl border-2 shadow-sm transition-colors ${drag.over==='unsorted'?'border-blue-400 bg-blue-50/20':'border-gray-200'} ${sm?'p-3':'p-5'}`}>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className={`font-bold text-gray-900 ${sm?'text-sm':'text-xl'}`}>Triage Inbox</h2>
+            <div className="flex items-center gap-1.5">
+              {syncing && <span className="text-[10px] text-blue-400 pulse">● syncing</span>}
+              {!syncing && <span className="text-[10px] text-green-500">● live</span>}
+              <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full font-semibold">{unsorted.length}</span>
+            </div>
+          </div>
+          <p className={`text-gray-400 mb-3 ${sm?'text-xs':'text-sm'}`}>Assign these to a quadrant — or drag here to unsort.</p>
+          {drag.over==='unsorted' && <div className="border-2 border-dashed border-blue-400 rounded-lg p-2 mb-2 text-center text-xs text-blue-400 font-semibold">Drop here</div>}
+          <div className={`space-y-2 overflow-y-auto ${sm?'max-h-56':'max-h-72'}`}>
+            {unsorted.length===0 && <p className="text-center py-5 text-gray-300 text-sm">Inbox zero! 🎉</p>}
+            {unsorted.map(task=>(
+              <div key={task.id} id={'t-'+task.id} draggable
+                onDragStart={e=>drag.onDragStart(e,task.id)} onDragEnd={e=>drag.onDragEnd(e,task.id)}
+                onTouchStart={e=>drag.onTouchStart(e,task.id)}
+                className="task-card bg-white p-3 rounded-xl border border-gray-200 shadow-sm select-none">
+                <div className="flex justify-between items-start gap-2 mb-2">
+                  <div className="flex items-start gap-1 flex-1 min-w-0">
+                    <span className="text-gray-300 shrink-0 text-sm mt-0.5">⠿</span>
+                    <p className={`font-medium leading-tight ${task.strikethrough?'line-through text-gray-400':'text-gray-800'} ${sm?'text-xs':'text-sm'}`}>{task.text}</p>
+                  </div>
+                  <div className="flex gap-1 shrink-0">
+                    <button onPointerDown={e=>e.stopPropagation()} onClick={()=>openCal(task)}    className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-400 hover:text-blue-600">📅</button>
+                    <button onPointerDown={e=>e.stopPropagation()} onClick={()=>toggleStr(task.id)} className={`text-xs px-1.5 py-0.5 rounded font-bold ${task.strikethrough?'bg-blue-100 text-blue-600':'bg-gray-100 text-gray-400'}`}><s>S</s></button>
+                    <button onPointerDown={e=>e.stopPropagation()} onClick={()=>delT(task.id)}    className="text-gray-300 hover:text-red-500 p-1 text-xs">✕</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {[['do-first','Do First','bg-red-50 text-red-700'],['schedule','Schedule','bg-blue-50 text-blue-700'],
+                    ['delegate','Delegate','bg-orange-50 text-orange-700'],['delete','Delete','bg-gray-100 text-gray-700']].map(([id,lbl,cls])=>(
+                    <button key={id} onPointerDown={e=>e.stopPropagation()} onClick={()=>moveTask(task.id,id)}
+                      className={`${cls} py-1 rounded-lg text-xs font-semibold`}>{lbl}</button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+
+      /* ── USER BADGE ── */
+      const UserBadge = () => (
+        <div className="flex items-center gap-2">
+          <img src={user.photoURL} className="w-7 h-7 rounded-full border border-gray-200"/>
+          <span className="text-xs text-gray-600 font-medium hidden sm:inline">{user.displayName}</span>
+          <button onClick={logout} title="Sign out" className="text-xs text-gray-400 hover:text-red-500 border border-gray-200 rounded-lg px-2 py-1">↩</button>
+        </div>
+      );
+
+      return (
+        <div onTouchMove={drag.onTouchMove} onTouchEnd={drag.onTouchEnd}>
+
+          {/* VIEW TOGGLE */}
+          <div className="fixed top-3 right-4 z-[100] flex gap-1 bg-white/95 backdrop-blur-md border border-gray-200 rounded-2xl p-1 shadow-lg">
+            <button onClick={()=>setView('mac')}    className={`flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-bold transition ${view==='mac'?'bg-blue-600 text-white shadow':'text-gray-500 hover:bg-gray-100'}`}>💻 Mac</button>
+            <button onClick={()=>setView('iphone')} className={`flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-bold transition ${view==='iphone'?'bg-blue-600 text-white shadow':'text-gray-500 hover:bg-gray-100'}`}>📱 iPhone</button>
+          </div>
+
+          {/* ══ MAC VIEW ══ */}
+          {view==='mac' && (
+            <div className="h-screen flex flex-col bg-slate-100 overflow-hidden">
+              <div className="flex items-center gap-3 px-6 py-3 bg-white border-b border-gray-200 shrink-0 pr-48">
+                <img src="/icon-home.png" className="w-7 h-7 rounded-lg"/>
+                <h1 className="text-lg font-extrabold text-blue-900">Brain Dump</h1>
+                <span className="text-xs bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full font-semibold">{tasks.length} tasks</span>
+                <div className="ml-auto"><UserBadge/></div>
+              </div>
+              <div className="flex flex-1 gap-5 p-5 overflow-hidden">
+                {/* Left panel */}
+                <div className="w-72 shrink-0 flex flex-col gap-4 overflow-hidden">
+                  <DumpBlock sm dumpText={dumpText} onChange={handleDumpTextChange} onDump={handleDump}/>
+                  <div className="flex-1 overflow-hidden flex flex-col min-h-0"><TriageBlock sm/></div>
+                </div>
+                {/* Grid */}
+                <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+                  <p className="text-xs font-bold text-gray-500 mb-3 shrink-0">EXECUTION GRID — <span className="font-normal text-gray-400">drag & drop tasks between quadrants</span></p>
+                  <div className="grid grid-cols-2 gap-4 flex-1 overflow-hidden">
+                    {CATS.map(c=><Quad key={c.id} cat={c} tasks={ordered(c.id)} drag={drag} onPin={togglePin} onStrike={toggleStr} onDelete={delT} onCal={openCal}/>)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ══ IPHONE VIEW ══ */}
+          {view==='iphone' && (
+            <div className="min-h-screen bg-gray-50 pb-10">
+              <header className="flex items-center gap-3 px-5 pt-6 pb-4 bg-white border-b border-gray-200 sticky top-0 z-20 pr-36">
+                <img src="/icon-home.png" className="w-8 h-8 rounded-lg shadow-sm"/>
+                <h1 className="text-xl font-extrabold text-blue-900 flex-1">Brain Dump</h1>
+                <UserBadge/>
+              </header>
+              <main className="max-w-md mx-auto p-4 space-y-5">
+                <div>
+                  <h2 className="text-xl font-bold text-gray-900 mb-1 pl-1">Execution Grid</h2>
+                  <p className="text-xs text-gray-400 mb-3 pl-1">Hold & drag tasks to move</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    {CATS.map(c=><Quad key={c.id} cat={c} tasks={ordered(c.id)} drag={drag} sm onPin={togglePin} onStrike={toggleStr} onDelete={delT} onCal={openCal}/>)}
+                  </div>
+                </div>
+                <TriageBlock/>
+                <DumpBlock dumpText={dumpText} onChange={handleDumpTextChange} onDump={handleDump}/>
+              </main>
+            </div>
+          )}
+
+          <CalModal task={calTask} date={calDate} setDate={setCalDate} onConfirm={confirmCal} onClose={()=>setCalTask(null)}/>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
